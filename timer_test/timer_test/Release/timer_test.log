@@ -1,0 +1,6 @@
+﻿  timer_test.vcxproj -> C:\Users\educ\Documents\Visual Studio 2015\Projects\timer_test\Release\timer_test.exe
+  timer_test.vcxproj -> C:\Users\educ\Documents\Visual Studio 2015\Projects\timer_test\Release\timer_test.pdb (Full PDB)
+  copy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin\cudart*.dll" "C:\Users\educ\Documents\Visual Studio 2015\Projects\timer_test\Release\"
+  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin\cudart32_80.dll
+  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin\cudart64_80.dll
+          2 file(s) copied.
