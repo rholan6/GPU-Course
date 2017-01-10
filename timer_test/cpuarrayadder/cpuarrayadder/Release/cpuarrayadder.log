@@ -4,6 +4,7 @@
 CUDACOMPILE : nvcc warning : The 'compute_20', 'sm_20', and 'sm_21' architectures are deprecated, and may be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning).
   kernel.cu
 C:/Users/educ/Documents/Visual Studio 2015/Projects/GPU-Course/timer_test/cpuarrayadder/cpuarrayadder/kernel.cu(23): warning C4244: 'argument': conversion from 'time_t' to 'unsigned int', possible loss of data
+  Source.cpp
   Generating code
   0 of 2 functions ( 0.0%) were compiled, the rest were copied from previous compilation.
     0 functions were new in current compilation
