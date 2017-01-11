@@ -1,88 +1,237 @@
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "../high_performance_timer/highperformancetimer.h"
 
 #include <stdio.h>
 #include <iostream>
+#include <string>
+#include <stdlib.h>
+#include <time.h>
 
 using namespace std;
 
-cudaError_t setup(int* dev_a, int* dev_b, int* dev_c, size_t size);
+bool setupArrays(int** a, int** b, int** c, int size);
+void fillArrays(int* a, int* b, int size);
+cudaError_t setupGPU(int* dev_a, int* dev_b, int* dev_c, size_t size, cudaDeviceProp* dev_properties);
 cudaError_t addWithCuda(int *c, const int *a, const int *b, size_t size);
+void addWithCPU(int*a, int*b, int*c, int size);
 
-__global__ void addKernel(int *c, const int *a, const int *b)
+/*
+ *	addKernel
+ */
+__global__ void addKernel(int *c, const int *a, const int *b, const int size)
 {
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i < size) {
+		c[i] = a[i] + b[i];
+	}
+    //int i = threadIdx.x;
+    //c[i] = a[i] + b[i];
 }
 
-int main()
+/*
+ *	main
+ */
+int main(int argc, char* argv[])
 {
-    const int arraySize = 5;
-    const int a[arraySize] = { 1, 2, 3, 4, 5 };
-    const int b[arraySize] = { 10, 20, 30, 40, 50 };
-    int c[arraySize] = { 0 };
+	//seed the rng for filling arrays later
+	srand(time(NULL));
+
+	//set up a variable to store cudaError_t from cuda functions
+	cudaError_t cudaStatus;
+
+	//ready the timer
+	HighPrecisionTime hpt;
+	//also some timer variables
+	double totalCPUTime = 0.0;
+	double averageCPUTime = 0.0;
+	double totalGPUTime = 0.0;
+
+	//make pointers for the arrays (we can malloc them later when we have a size for them)
+	int *a, *b, *c;
+	a = b = c = nullptr;
+
+	//set defaults for array size and number of tests
+	int arraySize = 1000;
+	int repetitions = 100;
+	//if the user provided values for either of the above, use those instead of the defaults
+	if (argc > 1) {
+		arraySize = stoi(argv[1]);
+	}
+	if (argc > 2) {
+		repetitions = stoi(argv[2]);
+	}
+	//output the values being used
+	cout << "Running " << repetitions << " tests on " << arraySize << "-element arrays" << endl;
+
 	//exit code (set to 1 in cases of error)
 	int retVal = 0;
 
-    // Add vectors in parallel.
-    cudaError_t cudaStatus = addWithCuda(c, a, b, arraySize);
-    if (cudaStatus != cudaSuccess) {
-		//print errors to stderr instead of stdout (good practice for larger programs with less important output going to stdout which the user can pipe elsewhere)
-		cerr << "addWithCuda failed!" << endl;
-		//after printing the error, exit with code 1 (indicating something went wrong)
-        retVal = 1;
-		goto end_label;
-    }
+	try
+	{
+		/*
+			Allocate arrays
+		*/
+		//let the user know what's going on
+		cout << "Allocating space for arrays" << endl;
+		//since we know the size for these arrays, malloc a, b, and c
+		if (!setupArrays(&a, &b, &c, arraySize)) {
+			//if we can't malloc them, the show can't go on. just give up.
+			throw "failed to allocate arrays";
+		}
 
-	//leaving this as a printf because the equivalent cout would look terrible
-    printf("{1,2,3,4,5} + {10,20,30,40,50} = {%d,%d,%d,%d,%d}\n",
-        c[0], c[1], c[2], c[3], c[4]);
+		/*
+			Set up GPU
+		*/
+		int *dev_a, *dev_b, *dev_c;
+		dev_a = dev_b = dev_c = nullptr;
+		cudaStatus = setupGPU(/*fill me*/);
 
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
-    cudaStatus = cudaDeviceReset();
-    if (cudaStatus != cudaSuccess) {
-		cerr << "cudaDeviceReset failed!" << endl;
-		//exit with code 1 (to indicate things went south)
-        retVal = 1;
-		goto end_label;
-    }
+		/*
+			Add with CPU
+		*/
+		cout << "Adding with the CPU" << endl;
+		for (int i = 0; i < repetitions; i++) {
+			//may as well start with new random values each time
+			fillArrays(a, b, arraySize);
+			//start the timer, add the arrays, and add the time elapsed to our total
+			hpt.TimeSinceLastCall();
+			addWithCPU(a, b, c, arraySize);
+			totalCPUTime += hpt.TimeSinceLastCall();
+		}
+		cout << "Adding together " << arraySize << "-element arrays " << repetitions << " times with the CPU took " << totalCPUTime << " seconds" << endl;
+		//figure out the average time for CPU adding
+		averageCPUTime = totalCPUTime / repetitions;
+		cout << "The average time for adding them with the CPU was " << averageCPUTime << " seconds\n" << endl;
 
-end_label:
+		/*
+			Add with GPU
+		*/
+		cout << "Adding with the GPU" << endl;
+		for (int i = 0; i < repetitions; i++) {
+			cudaStatus = addWithCuda(c, a, b, arraySize);
+			if (cudaStatus != cudaSuccess) {
+				//throw an exception if things went south
+				throw("addWithCuda failed! on repetition " + i);
+			}
+		}
+
+		/*
+			Clean up
+		*/
+
+		// cudaDeviceReset must be called before exiting in order for profiling and
+		// tracing tools such as Nsight and Visual Profiler to show complete traces.
+		cudaStatus = cudaDeviceReset();
+		if (cudaStatus != cudaSuccess) {
+			//throw an exception if things go south
+			throw "cudaDeviceReset failed!";
+		}
+	}
+	catch (char* e)
+	{
+		cerr << "ERROR: " << e << endl;
+		retVal = 1;
+	}
+
     return retVal;
 }
 
-//set up the arrays and CUDA environment
-cudaError_t setup(int* dev_a, int* dev_b, int* dev_c, size_t size) 
+/*
+ *	setupArrays 
+ */
+//attempt to malloc a, b, and c
+bool setupArrays(int** a, int** b, int** c, int size)
+{
+	//Assume things will work until they don't
+	bool success = true;
+
+	//try to find room for all the arrays
+	try
+	{
+		//make some room in memory for these arrays
+		*a = (int*)malloc(size * sizeof(int));
+		if (*a == nullptr) {
+			throw "malloc() FAILED on a";
+		}
+
+		*b = (int*)malloc(size * sizeof(int));
+		if (*b == nullptr) {
+			throw "malloc() FAILED on b";
+		}
+
+		*c = (int*)malloc(size * sizeof(int));
+		if (*c == nullptr) {
+			throw "malloc() FAILED on c";
+		}
+	}
+	catch (char* e)
+	{
+		//print the error (ERROR: malloc() FAILED on [id])
+		cerr << "ERROR: " << e << endl;
+		//free anything that was successfully malloc'd
+		if (*a != nullptr) {
+			free(*a);
+		}
+		if (*b != nullptr) {
+			free(*b);
+		}
+		if (*c != nullptr /*then why are we here*/) {
+			free(*c);
+		}
+		//we did not succeed
+		success = false;
+	}
+
+	//tell the user how we did
+	return success;
+}
+
+/*
+ *	fillArrays
+ */
+//fills a and b with randomish numbers (c is getting overwritten anyway, so it doesn't really matter)
+void fillArrays(int* a, int* b, int size)
+{
+	for (int i = 0; i < size; i++) {
+		a[i] = rand() % 25;
+		b[i] = rand() % 20;
+	}
+}
+
+
+/*
+ *	setupGPU
+ */
+//set up the GPU arrays and CUDA environment
+cudaError_t setupGPU(int* dev_a, int* dev_b, int* dev_c, size_t size, cudaDeviceProp* dev_properties)
 {
 	cudaError_t cudaStatus;
 	try
 	{
-		// Choose which GPU to run on, change this on a multi-GPU system.
-		cudaStatus = cudaSetDevice(0);
-		if (cudaStatus != cudaSuccess) {
-			//cerr << "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?" << endl;
-			throw "cudaSetDevice failed";
+		//select a GPU (0) and get its properties
+		if (cudaSetDevice(0) != cudaSuccess) {
+			throw "cudaSetDevice(0) failed";
+		}
+		if (cudaGetDeviceProperties(dev_properties, 0) != cudaSuccess) {
+			throw "FAILED to get properties for device 0";
 		}
 
-		// Allocate GPU buffers for three vectors (two input, one output)    .
-		cudaStatus = cudaMalloc(&dev_c, size * sizeof(int));
-		if (cudaStatus != cudaSuccess) {
-			//cerr << "cudaMalloc failed on dev_c!" << endl;
-			throw "cudaMalloc failed on dev_c";
-		}
-
+		//find room for the three arrays
 		cudaStatus = cudaMalloc(&dev_a, size * sizeof(int));
 		if (cudaStatus != cudaSuccess) {
-			//cerr << "cudaMalloc failed on dev_a!" << endl;
 			throw "cudaMalloc failed on dev_a";
 		}
 
 		cudaStatus = cudaMalloc(&dev_b, size * sizeof(int));
 		if (cudaStatus != cudaSuccess) {
-			//cerr << "cudaMalloc failed on dev_b!" << endl;
 			throw "cudaMalloc failed on dev_b";
+		}
+		
+		cudaStatus = cudaMalloc(&dev_c, size * sizeof(int));
+		if (cudaStatus != cudaSuccess) {
+			throw "cudaMalloc failed on dev_c";
 		}
 	}
 	catch (char* e) 
@@ -105,6 +254,10 @@ cudaError_t setup(int* dev_a, int* dev_b, int* dev_c, size_t size)
 	return cudaStatus;
 }
 
+
+/*
+ *	addWithCuda
+ */
 // Helper function for using CUDA to add vectors in parallel.
 cudaError_t addWithCuda(int *c, const int *a, const int *b, size_t size)
 {
@@ -112,56 +265,76 @@ cudaError_t addWithCuda(int *c, const int *a, const int *b, size_t size)
     int *dev_b = 0;
     int *dev_c = 0;
     cudaError_t cudaStatus;
+	cudaDeviceProp dev_properties;
 
 	try
 	{
-		cudaStatus = setup(dev_a, dev_b, dev_c, size);
-
+		cudaStatus = setupGPU(dev_a, dev_b, dev_c, size, &dev_properties);
+		if (cudaStatus != cudaSuccess) {
+			throw "Failed to prepare GPU";
+		}
 
 		// Copy input vectors from host memory to GPU buffers.
 		cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
-			cerr << "cudaMemcpy failed on a!" << endl;
-			goto Error;
+			throw "cudaMemcpy failed on a!";
 		}
 
 		cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
-			cerr << "cudaMemcpy failed on b!" << endl;
-			goto Error;
+			throw "cudaMemcpy failed on b!";
 		}
 
+		//math
+		int blocksNeeded = (size + dev_properties.maxThreadsPerBlock - 1) / dev_properties.maxThreadsPerBlock;
+
+		addKernel <<<blocksNeeded, dev_properties.maxThreadsPerBlock >>>(dev_c, dev_a, dev_b, size);
+
 		// Launch a kernel on the GPU with one thread for each element.
-		addKernel << <1, size >> > (dev_c, dev_a, dev_b);
+		//addKernel <<<1, size >>> (dev_c, dev_a, dev_b);
 
 		// Check for any errors launching the kernel
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess) {
-			cerr << "addKernel launch failed: " << cudaGetErrorString(cudaStatus) << endl;
-			goto Error;
+			//Beautiful
+			string error = "addKernel launch failed: " + (string)cudaGetErrorString(cudaStatus);
+			throw error.c_str();
 		}
 
 		// cudaDeviceSynchronize waits for the kernel to finish, and returns
 		// any errors encountered during the launch.
 		cudaStatus = cudaDeviceSynchronize();
 		if (cudaStatus != cudaSuccess) {
-			cerr << "cudaDeviceSynchronize returned error code " << cudaStatus << " after launching addKernel!" << endl;
-			goto Error;
+			//Such pretty. Wow.
+			string error = "cudaDeviceSynchronize returned error code " + cudaStatus + (string)" after launching addKernel!";
+			throw error;
 		}
 
 		// Copy output vector from GPU buffer to host memory.
 		cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) {
-			cerr << "cudaMemcpy failed on dev_c!" << endl;
-			goto Error;
+			throw "cudaMemcpy failed on dev_c!";
 		}
 	}
 	catch (char* e)
 	{
+		cerr << "Error: " << e << endl;
 		cudaFree(dev_c);
 		cudaFree(dev_a);
 		cudaFree(dev_b);
 	}
 
     return cudaStatus;
+}
+
+
+/*
+ *	addWithCPU
+ */
+//like addWithCuda, but on the cpu instead of the gpu
+void addWithCPU(int*a, int*b, int*c, int size)
+{
+	for (int i = 0; i < size; i++) {
+		c[i] = a[i] + b[i];
+	}
 }
