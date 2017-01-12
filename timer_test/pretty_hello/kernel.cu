@@ -13,9 +13,12 @@ using namespace std;
 
 bool setupArrays(int** a, int** b, int** c, int size);
 void fillArrays(int* a, int* b, int size);
+cudaError_t copyArrays(int* a, int* b, int* c, int* dev_a, int* dev_b, int* dev_c);
 cudaError_t setupGPU(int* dev_a, int* dev_b, int* dev_c, size_t size, cudaDeviceProp* dev_properties);
 cudaError_t addWithCuda(int *c, const int *a, const int *b, size_t size);
 void addWithCPU(int*a, int*b, int*c, int size);
+void cleanupCPU(int* a, int* b, int* c);
+void cleanupGPU(int* dev_a, int* dev_b, int* dev_c);
 
 /*
  *	addKernel
@@ -171,15 +174,7 @@ bool setupArrays(int** a, int** b, int** c, int size)
 		//print the error (ERROR: malloc() FAILED on [id])
 		cerr << "ERROR: " << e << endl;
 		//free anything that was successfully malloc'd
-		if (*a != nullptr) {
-			free(*a);
-		}
-		if (*b != nullptr) {
-			free(*b);
-		}
-		if (*c != nullptr /*then why are we here*/) {
-			free(*c);
-		}
+		cleanupCPU(*a, *b, *c);
 		//we did not succeed
 		success = false;
 	}
@@ -200,6 +195,14 @@ void fillArrays(int* a, int* b, int size)
 	}
 }
 
+/*
+ *	copyArrays
+ */
+//copy arrays to gpu memory
+cudaError_t copyArrays(int* a, int* b, int* c, int* dev_a, int* dev_b, int* dev_c)
+{
+	//fill me
+}
 
 /*
  *	setupGPU
@@ -239,15 +242,7 @@ cudaError_t setupGPU(int* dev_a, int* dev_b, int* dev_c, size_t size, cudaDevice
 		//catch the exception in more than name alone
 		cerr << "Error: " << e << endl;
 		//if we run into any problems, free anything that was successfully malloc'd
-		if (dev_c != 0) {
-			cudaFree(dev_c);
-		}
-		if (dev_a != 0) {
-			cudaFree(dev_a);
-		}
-		if (dev_b != 0) {
-			cudaFree(dev_b);
-		}
+		cleanupGPU(dev_a, dev_b, dev_c);
 	}
 
 	//return cudaSuccess or whatever error we encountered
@@ -319,9 +314,7 @@ cudaError_t addWithCuda(int *c, const int *a, const int *b, size_t size)
 	catch (char* e)
 	{
 		cerr << "Error: " << e << endl;
-		cudaFree(dev_c);
-		cudaFree(dev_a);
-		cudaFree(dev_b);
+		cleanupGPU(dev_a, dev_b, dev_c);
 	}
 
     return cudaStatus;
@@ -336,5 +329,41 @@ void addWithCPU(int*a, int*b, int*c, int size)
 {
 	for (int i = 0; i < size; i++) {
 		c[i] = a[i] + b[i];
+	}
+}
+
+
+/*
+ *	cleanupCPU
+ */
+//free any allocated arrays from normal memory
+void cleanupCPU(int* a, int* b, int* c)
+{
+	if (a != nullptr) {
+		free(a);
+	}
+	if (b != nullptr) {
+		free(b);
+	}
+	if (c != nullptr) {
+		free(c);
+	}
+}
+
+/*
+ *	cleanupGPU
+ */
+//tie up loose ends with GPU memory
+void cleanupGPU(int* dev_a, int* dev_b, int* dev_c)
+{
+	//free up arrays
+	if (dev_c != 0) {
+		cudaFree(dev_c);
+	}
+	if (dev_a != 0) {
+		cudaFree(dev_a);
+	}
+	if (dev_b != 0) {
+		cudaFree(dev_b);
 	}
 }
