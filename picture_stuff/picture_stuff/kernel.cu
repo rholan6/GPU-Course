@@ -13,20 +13,53 @@
 
 using namespace cv;
 
-__global__ void thresholdKernel(unsigned char* original, unsigned char* modified, unsigned char threshold)
+/*
+ *	Global Variables
+ */
+unsigned char thresholdSlider = 128;
+char* windowName = "Display window";
+unsigned char* dev_original = 0;
+unsigned char* dev_modified = 0;
+int dataSize = 0;
+Mat image;
+
+/*
+ *	Threshold Kernel
+ */
+__global__ void thresholdKernel(unsigned char* original, unsigned char* modified, unsigned char threshold, int size)
 {
-	int current = blockIdx.x * gridDim.x + threadIdx.x;
-	if (original[current] > threshold) {
-		modified[current] = 255;
+	int current = blockIdx.x * /*gridDim.x*/blockDim.x + threadIdx.x;
+	if (current < size)
+	{
+		if (original[current] > threshold) {
+			modified[current] = 255;
+		}
+		else {
+			modified[current] = 0;
+		}
+	}
+	/*unsigned char* current = original + (blockIdx.x * gridDim.x + threadIdx.x);
+	unsigned char* modifiedCurrent = modified + (blockIdx.x * gridDim.x + threadIdx.x);
+	if (*current > *threshold) {
+		*modifiedCurrent = 255;
 	}
 	else {
-		modified[current] = 0;
-	}
+		*modifiedCurrent = 0;
+	}*/
 }
 
-void threshold(unsigned char threshold, Mat& image);
-cudaError_t GPUThreshold(unsigned char threshold, Mat& original);
 
+/*
+ *	Function prototypes
+ */
+void threshold(unsigned char threshold, Mat& image);
+void on_trackbar(int, void*);
+cudaError_t GPUThreshold(unsigned char threshold);
+
+
+/*
+ *	Main
+ */
 int main(int argc, char* argv[])
 {
 	if (argc != 2) {
@@ -34,7 +67,7 @@ int main(int argc, char* argv[])
 		exit(1);
 	}
 
-	Mat image;
+	//Mat image;
 	image = imread(argv[1], CV_LOAD_IMAGE_COLOR);
 
 	printf("Number of channels: %d\n", image.channels());
@@ -45,29 +78,54 @@ int main(int argc, char* argv[])
 	}
 
 	cvtColor(image, image, COLOR_RGB2GRAY);
+	//namedWindow(windowName, WINDOW_NORMAL);
+	//imshow(windowName, image);
+	//waitKey(0);
 
-	unsigned char THRESHOLD = 100;
+	printf("Number of channels: %d\n", image.channels());
+
+	//unsigned char THRESHOLD = 100;
 
 #ifdef GPU_VER
 	cudaError_t cudaStatus;
 
-	cudaStatus = GPUThreshold(THRESHOLD, image);
+	cudaStatus = cudaSetDevice(0);
+	if (cudaStatus != cudaSuccess) {
+		throw "FAILED to set CUDA device";
+	}
+
+	//call this once so I don't need to move all the cuda setup code (and to see a thresholded image from the start)
+	cudaStatus = GPUThreshold(thresholdSlider);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "FAILED to apply threshold filter\n");
 		//not sure what state the image will be in after things fail, but it's probably better to just stop
 		exit(1);
 	}
+
+	namedWindow(windowName, WINDOW_NORMAL);
+	createTrackbar("Threshold", windowName, (int*)&thresholdSlider, 255, on_trackbar);
+	on_trackbar(thresholdSlider, 0);
+	//imshow(windowName, image);
 #endif
 #ifndef GPU_VER
 	threshold(THRESHOLD, image);
 #endif
 
-	namedWindow("Display window", WINDOW_NORMAL);
-	imshow("Display window", image);
+	//namedWindow("Display window", WINDOW_NORMAL);
+	//imshow("Display window", image);
 
 	waitKey(0);
 
 #ifdef GPU_VER
+	//free memory (might move into catch block)
+	if (dev_original != 0) {
+		cudaFree(dev_original);
+	}
+	if (dev_modified != 0) {
+		cudaFree(dev_modified);
+	}
+	printf("GPU memory freed\n");
+
 	cudaStatus = cudaDeviceReset();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "FAILED on cudaDeviceReset\n");
@@ -77,6 +135,9 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
+/*
+ *	CPU Threshold
+ */
 void threshold(unsigned char threshold, Mat& image)
 {
 	unsigned char* end_data = image.data + (image.rows * image.cols);
@@ -90,20 +151,36 @@ void threshold(unsigned char threshold, Mat& image)
 	}
 }
 
-cudaError_t GPUThreshold(unsigned char threshold, Mat& original)
+/*
+ *	Trackbar Handler
+ */
+void on_trackbar(int, void*)
 {
-	unsigned char* dev_original = 0;
-	unsigned char* dev_modified = 0;
-	int* dev_threshold = 0;
 	cudaError_t cudaStatus;
-	int dataSize = original.rows * original.cols * sizeof(unsigned char);
+	printf("Threshold: %d\n", thresholdSlider);
+	int numBlocks = (1023 + image.rows * image.cols) / 1024;
+	thresholdKernel <<<numBlocks, 1024>>> (dev_original, dev_modified, thresholdSlider, dataSize);
+	cudaStatus = cudaDeviceSynchronize();
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "ERROR with threshold kernel: %d\n", cudaStatus);
+	}
+	cudaStatus = cudaMemcpy(image.data, dev_modified, dataSize, cudaMemcpyDeviceToHost);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "FAILED to copy modified data to CPU memory\n");
+	}
+	imshow(windowName, image);
+}
+
+/*
+ *	GPU Threshold
+ */
+cudaError_t GPUThreshold(unsigned char threshold)
+{
+	//unsigned char* dev_threshold = 0;
+	cudaError_t cudaStatus;
+	dataSize = image.rows * image.cols * sizeof(unsigned char);
 	try
 	{
-		cudaStatus = cudaSetDevice(0);
-		if (cudaStatus != cudaSuccess) {
-			throw "FAILED to set CUDA device";
-		}
-
 		cudaStatus = cudaMalloc((void**)&dev_original, dataSize);
 		if (cudaStatus != cudaSuccess) {
 			throw "FAILED to allocate dev_original";
@@ -114,18 +191,25 @@ cudaError_t GPUThreshold(unsigned char threshold, Mat& original)
 			throw "FAILED to allocate dev_modified";
 		}
 
-		cudaStatus = cudaMalloc((void**)&dev_threshold, sizeof(int));
+		/*cudaStatus = cudaMalloc((void**)&dev_threshold, sizeof(int));
 		if (cudaStatus != cudaSuccess) {
 			throw "FAILED to allocate dev_threshold";
-		}
+		}*/
 
-		cudaStatus = cudaMemcpy(dev_original, original.data, dataSize, cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(dev_original, image.data, dataSize, cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			throw "FAILED to copy image data to GPU memory";
 		}
 
-		int numBlocks = original.rows * original.cols / 1024;
-		thresholdKernel<<<numBlocks, 1024>>>(dev_original, dev_modified, threshold);
+		/*cudaStatus = cudaMemcpy(dev_threshold, &threshold, sizeof(unsigned char), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy threshold to GPU memory";
+		}*/
+		
+		printf("Setting numblocks\n");
+		int numBlocks = (1023 + image.rows * image.cols) / 1024;
+		printf("%d blocks\n", numBlocks);
+		thresholdKernel<<<numBlocks, 1024>>>(dev_original, dev_modified, threshold, dataSize);
 
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess) {
@@ -138,18 +222,32 @@ cudaError_t GPUThreshold(unsigned char threshold, Mat& original)
 			fprintf(stderr, "ERROR after launching thresholdKernel: %d\n", cudaStatus);
 			throw " ";
 		}
+
+		cudaStatus = cudaMemcpy(image.data, dev_modified, dataSize, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy modified data to CPU memory";
+		}
 	}
 	catch (char* e) {
 		fprintf(stderr, "%s\n", e);
+		//free memory (might move into catch block)
+		if (dev_original != 0) {
+			cudaFree(dev_original);
+		}
+		if (dev_modified != 0) {
+			cudaFree(dev_modified);
+		}
+		printf("GPU memory freed\n");
 	}
 
-	//free memory (might move into catch block)
+	/*//free memory (might move into catch block)
 	if (dev_original != 0) {
 		cudaFree(dev_original);
 	}
 	if (dev_modified != 0) {
 		cudaFree(dev_modified);
 	}
+	printf("GPU memory freed\n");*/
 
 	return cudaStatus;
 }
