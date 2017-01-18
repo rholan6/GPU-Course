@@ -1,5 +1,5 @@
 //since threshold has a gpu and cpu version, may as well have a way to not setup cuda if we only want the cpu version
-#define GPU_VER
+//#define GPU_VER
 
 #ifdef GPU_VER
 #include "cuda_runtime.h"
@@ -11,22 +11,27 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
+#include "hpt.h"
+
 using namespace cv;
+
+typedef unsigned char UBYTE;
 
 /*
  *	Global Variables
  */
-unsigned char thresholdSlider = 128;
+UBYTE thresholdSlider = 128;
 char* windowName = "Display window";
-unsigned char* dev_original = 0;
-unsigned char* dev_modified = 0;
+UBYTE* dev_original = 0;
+UBYTE* dev_modified = 0;
 int dataSize = 0;
 Mat image;
 
+#ifdef GPU_VER
 /*
  *	Threshold Kernel
  */
-__global__ void thresholdKernel(unsigned char* original, unsigned char* modified, unsigned char threshold, int size)
+__global__ void thresholdKernel(UBYTE* original, UBYTE* modified, UBYTE threshold, int size)
 {
 	int current = blockIdx.x * /*gridDim.x*/blockDim.x + threadIdx.x;
 	if (current < size)
@@ -38,8 +43,8 @@ __global__ void thresholdKernel(unsigned char* original, unsigned char* modified
 			modified[current] = 0;
 		}
 	}
-	/*unsigned char* current = original + (blockIdx.x * gridDim.x + threadIdx.x);
-	unsigned char* modifiedCurrent = modified + (blockIdx.x * gridDim.x + threadIdx.x);
+	/*UBYTE* current = original + (blockIdx.x * gridDim.x + threadIdx.x);
+	UBYTE* modifiedCurrent = modified + (blockIdx.x * gridDim.x + threadIdx.x);
 	if (*current > *threshold) {
 		*modifiedCurrent = 255;
 	}
@@ -47,14 +52,18 @@ __global__ void thresholdKernel(unsigned char* original, unsigned char* modified
 		*modifiedCurrent = 0;
 	}*/
 }
+#endif
 
 
 /*
  *	Function prototypes
  */
-void threshold(unsigned char threshold, Mat& image);
+void threshold(UBYTE threshold, Mat& image);
+#ifdef GPU_VER
 void on_trackbar(int, void*);
-cudaError_t GPUThreshold(unsigned char threshold);
+cudaError_t GPUThreshold(UBYTE threshold);
+#endif
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp);
 
 
 /*
@@ -70,7 +79,7 @@ int main(int argc, char* argv[])
 	//Mat image;
 	image = imread(argv[1], CV_LOAD_IMAGE_COLOR);
 
-	printf("Number of channels: %d\n", image.channels());
+	//printf("Number of channels: %d\n", image.channels());
 
 	if (!image.data) {
 		printf("Could not find or open the image\n");
@@ -78,13 +87,14 @@ int main(int argc, char* argv[])
 	}
 
 	cvtColor(image, image, COLOR_RGB2GRAY);
-	//namedWindow(windowName, WINDOW_NORMAL);
-	//imshow(windowName, image);
-	//waitKey(0);
+	namedWindow(windowName, WINDOW_NORMAL);
+	imshow(windowName, image);
+	waitKey(0);
 
-	printf("Number of channels: %d\n", image.channels());
+	//printf("Number of channels: %d\n", image.channels());
+	HighPrecisionTime hpt;
 
-	//unsigned char THRESHOLD = 100;
+	//UBYTE THRESHOLD = 100;
 
 #ifdef GPU_VER
 	cudaError_t cudaStatus;
@@ -108,7 +118,31 @@ int main(int argc, char* argv[])
 	//imshow(windowName, image);
 #endif
 #ifndef GPU_VER
-	threshold(THRESHOLD, image);
+	//threshold(THRESHOLD, image);
+	
+	//set up the kernel for the box filter
+	UBYTE boxKernel[] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+	int kw = 3;
+	int kh = 3;
+
+	//here is where we would set up src, but image is already set so we'll use that
+
+	//next we would convert to greyscale, but we already did that too
+
+	//make two more Mats for box filtering
+	Mat dst = image;
+	Mat tmp = image;
+
+	//get ready to time the filter
+	hpt.TimeSinceLastCall();
+	//apply the filter
+	boxFilter(image.data, dst.data, image.cols, image.rows, boxKernel, kw, kh, tmp.data);
+	//time the filter
+	double boxTime = hpt.TimeSinceLastCall();
+	printf("The box filter took %f seconds\n", boxTime);
+
+	//show the image
+	imshow(windowName, dst);
 #endif
 
 	//namedWindow("Display window", WINDOW_NORMAL);
@@ -138,10 +172,10 @@ int main(int argc, char* argv[])
 /*
  *	CPU Threshold
  */
-void threshold(unsigned char threshold, Mat& image)
+void threshold(UBYTE threshold, Mat& image)
 {
-	unsigned char* end_data = image.data + (image.rows * image.cols);
-	for (unsigned char* p = image.data; p < end_data; p++) {
+	UBYTE* end_data = image.data + (image.rows * image.cols);
+	for (UBYTE* p = image.data; p < end_data; p++) {
 		if (*p > threshold) {
 			*p = 255;
 		}
@@ -151,6 +185,7 @@ void threshold(unsigned char threshold, Mat& image)
 	}
 }
 
+#ifdef GPU_VER
 /*
  *	Trackbar Handler
  */
@@ -174,11 +209,11 @@ void on_trackbar(int, void*)
 /*
  *	GPU Threshold
  */
-cudaError_t GPUThreshold(unsigned char threshold)
+cudaError_t GPUThreshold(UBYTE threshold)
 {
-	//unsigned char* dev_threshold = 0;
+	//UBYTE* dev_threshold = 0;
 	cudaError_t cudaStatus;
-	dataSize = image.rows * image.cols * sizeof(unsigned char);
+	dataSize = image.rows * image.cols * sizeof(UBYTE);
 	try
 	{
 		cudaStatus = cudaMalloc((void**)&dev_original, dataSize);
@@ -201,7 +236,7 @@ cudaError_t GPUThreshold(unsigned char threshold)
 			throw "FAILED to copy image data to GPU memory";
 		}
 
-		/*cudaStatus = cudaMemcpy(dev_threshold, &threshold, sizeof(unsigned char), cudaMemcpyHostToDevice);
+		/*cudaStatus = cudaMemcpy(dev_threshold, &threshold, sizeof(UBYTE), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			throw "FAILED to copy threshold to GPU memory";
 		}*/
@@ -250,4 +285,41 @@ cudaError_t GPUThreshold(unsigned char threshold)
 	printf("GPU memory freed\n");*/
 
 	return cudaStatus;
+}
+#endif
+
+/*
+ *	CPU box filter
+ */
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp)
+{
+	//used to easily move to surrounding pixels
+	int indices[] = {-(w+1), -w, -(w-1), -1, 0, 1, w-1, w, w+1};
+
+	//we divide each pixel's post-multiplication value by the sum of every kernel value, so may as well make it a variable
+	int kernelSum = 0;
+	for (int k = 0; k < kw*kh; k++) {
+		kernelSum += kernel[k];
+	}
+
+	//go through each row (except the top and bottom)
+	for (int i = 1; i < h - 1; i++) 
+	{
+		//go through each column within a row (except the left and right edges)
+		for (int j = 1; j < w - 1; j++) 
+		{
+			//the current pixel's new value
+			float current = 0.0f;
+			//the current pixel's 1d array position
+			int position = (i * w) + j;
+			//go through each item in the kernel
+			for (int k = 0; k < kw * kh; k++) 
+			{
+				//sum up the result of kernel value * original value for each neighboring pixel
+				current += float(src[position + indices[k]]) * float(kernel[k]);
+			}
+			//divide it by the sum of all the kernel values
+			dst[position] = int(current / float(kernelSum));
+		}
+	}
 }
