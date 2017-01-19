@@ -21,11 +21,28 @@ typedef unsigned char UBYTE;
  *	Global Variables
  */
 UBYTE thresholdSlider = 128;
-char* windowName = "Display window";
+//GPU pointers
 UBYTE* dev_original = 0;
 UBYTE* dev_modified = 0;
+//general
 int dataSize = 0;
 Mat image;
+char* windowName = "Display window";
+//timer
+HighPrecisionTime hpt;
+double totalTime = 0.0;
+int runs = 0;
+//kernel for the box filter
+//edgy
+//int boxKernel[] = { -1, 0, 1, -2, 0, 2, -1, 0, 1 };
+//3x3 blur
+//int boxKernel[] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+//5x5 blur
+//int boxKernel[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+const int kw = 19;
+const int kh = 19;
+//generic blur
+int boxKernel[kw * kh];
 
 #ifdef GPU_VER
 /*
@@ -63,7 +80,8 @@ void threshold(UBYTE threshold, Mat& image);
 void on_trackbar(int, void*);
 cudaError_t GPUThreshold(UBYTE threshold);
 #endif
-void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp);
+void boxTrackbar(int, void*);
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, int* kernel, int kw, int kh, UBYTE* tmp);
 
 
 /*
@@ -91,8 +109,16 @@ int main(int argc, char* argv[])
 	imshow(windowName, image);
 	waitKey(0);
 
+	//fill kernel with ones
+	for (int i = 0; i < kw * kh; i++) {
+		boxKernel[i] = 1;
+	}
+
+	//set up a trackbar for quick timing
+	createTrackbar("Threshold", windowName, (int*)&thresholdSlider, 255, boxTrackbar);
+	boxTrackbar(thresholdSlider, 0);
+
 	//printf("Number of channels: %d\n", image.channels());
-	HighPrecisionTime hpt;
 
 	//UBYTE THRESHOLD = 100;
 
@@ -117,7 +143,7 @@ int main(int argc, char* argv[])
 	on_trackbar(thresholdSlider, 0);
 	//imshow(windowName, image);
 #endif
-#ifndef GPU_VER
+#ifdef GPU_VER //normally ifndef, but needed to make this not run
 	//threshold(THRESHOLD, image);
 	
 	//set up the kernel for the box filter
@@ -149,6 +175,10 @@ int main(int argc, char* argv[])
 	//imshow("Display window", image);
 
 	waitKey(0);
+	printf("\n\nFinal stats:\n");
+	printf("Image size: %d x %d\n", image.cols, image.rows);
+	printf("Kernel size: %d x %d\n", kw, kh);
+	printf("Average time: %f\n", totalTime / double(runs));
 
 #ifdef GPU_VER
 	//free memory (might move into catch block)
@@ -289,12 +319,58 @@ cudaError_t GPUThreshold(UBYTE threshold)
 #endif
 
 /*
+ *	apply box filter on trackbar movement
+ */
+void boxTrackbar(int, void*)
+{
+	//record that we're running this again
+	runs++;
+	
+	//here we would set up the kernel if it wasn't global
+
+	//here is where we would set up src, but image is already set so we'll use that
+
+	//next we would convert to greyscale, but we already did that too
+
+	//make two more Mats for box filtering
+	Mat dst, tmp;
+	image.copyTo(dst);
+	image.copyTo(tmp);
+
+	//int kernel2[] = { -1, -2, -1, 0, 0, 0, 1, 2, 1 };
+
+	//get ready to time the filter
+	hpt.TimeSinceLastCall();
+	//apply the filter
+	boxFilter(image.data, dst.data, image.cols, image.rows, boxKernel, kw, kh, tmp.data);
+	//time the filter
+	double boxTime = hpt.TimeSinceLastCall();
+	totalTime += boxTime;
+	//boxFilter(image.data, tmp.data, image.cols, image.rows, kernel2, kw, kh, dst.data);
+
+	//print the results
+	printf("Image size: %d x %d\n", image.cols, image.rows);
+	printf("Kernel size: %d x %d\n", kw, kh);
+	printf("Time this run: %f\n", boxTime);
+	printf("Average time so far: %f\n", totalTime / double(runs));
+
+	//show the image
+	imshow(windowName, dst);
+}
+
+/*
  *	CPU box filter
  */
-void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp)
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, int* kernel, int kw, int kh, UBYTE* tmp)
 {
 	//used to easily move to surrounding pixels
-	int indices[] = {-(w+1), -w, -(w-1), -1, 0, 1, w-1, w, w+1};
+	//int indices[] = {-(w+1), -w, -(w-1), -1, 0, 1, w-1, w, w+1};
+
+	//leave an outer border so we don't need to handle literal edge cases
+	int wEdge = kw / 2;
+	int hEdge = kh / 2;
+	//int hEdge = kh / 2;
+	//printf("edge: %d\n", edge);
 
 	//we divide each pixel's post-multiplication value by the sum of every kernel value, so may as well make it a variable
 	int kernelSum = 0;
@@ -303,23 +379,40 @@ void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int 
 	}
 
 	//go through each row (except the top and bottom)
-	for (int i = 1; i < h - 1; i++) 
+	for (int i = hEdge; i < h - hEdge; i++) 
 	{
 		//go through each column within a row (except the left and right edges)
-		for (int j = 1; j < w - 1; j++) 
+		for (int j = hEdge; j < w - wEdge; j++) 
 		{
 			//the current pixel's new value
 			float current = 0.0f;
 			//the current pixel's 1d array position
 			int position = (i * w) + j;
 			//go through each item in the kernel
-			for (int k = 0; k < kw * kh; k++) 
+			for (int kr = -hEdge; kr <= hEdge; kr++) 
+			{
+				for (int kc = -wEdge; kc <= wEdge; kc++) 
+				{
+					//printf("(%d, %d)\n", kr, kc);
+					int relativePos = kr * w + kc;
+					int kernelPos = (kr + hEdge) * kw + kc + wEdge;
+					//printf("kr: %d, kc: %d, relativePos: %d, kernelPos: %d\n", kr, kc, relativePos, kernelPos);
+					current += float(src[position + relativePos]) * float(kernel[kernelPos]);
+				}
+			}
+			/*for (int k = 0; k < kw * kh; k++) 
 			{
 				//sum up the result of kernel value * original value for each neighboring pixel
 				current += float(src[position + indices[k]]) * float(kernel[k]);
+			}*/
+			//if kernelSum isn't zero (dividing by zero considered harmful)
+			if (kernelSum != 0) {
+				//divide it by the sum of all the kernel values
+				dst[position] = int(current / float(kernelSum));
 			}
-			//divide it by the sum of all the kernel values
-			dst[position] = int(current / float(kernelSum));
+			else {
+				dst[position] = int(current / 1.0f);
+			}
 		}
 	}
 }
