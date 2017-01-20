@@ -382,7 +382,7 @@ void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, int* kernel, int kw, int kh
 	for (int i = hEdge; i < h - hEdge; i++) 
 	{
 		//go through each column within a row (except the left and right edges)
-		for (int j = hEdge; j < w - wEdge; j++) 
+		for (int j = wEdge; j < w - wEdge; j++) 
 		{
 			//the current pixel's new value
 			float current = 0.0f;
