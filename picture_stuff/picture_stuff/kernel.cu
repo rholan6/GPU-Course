@@ -1,10 +1,8 @@
 //since threshold has a gpu and cpu version, may as well have a way to not setup cuda if we only want the cpu version
-//#define GPU_VER
+#define GPU_VER
 
-#ifdef GPU_VER
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#endif
 
 #include <stdio.h>
 #include <opencv2/core/core.hpp>
@@ -42,15 +40,15 @@ int runs = 0;
 const int kw = 19;
 const int kh = 19;
 //generic blur
-int boxKernel[kw * kh];
+UBYTE boxKernel[kw * kh];
 
 #ifdef GPU_VER
 /*
  *	Threshold Kernel
  */
-__global__ void thresholdKernel(UBYTE* original, UBYTE* modified, UBYTE threshold, int size)
+/*__global__ void thresholdKernel(UBYTE* original, UBYTE* modified, UBYTE threshold, int size)
 {
-	int current = blockIdx.x * /*gridDim.x*/blockDim.x + threadIdx.x;
+	int current = blockIdx.x * blockDim.x + threadIdx.x;
 	if (current < size)
 	{
 		if (original[current] > threshold) {
@@ -68,6 +66,59 @@ __global__ void thresholdKernel(UBYTE* original, UBYTE* modified, UBYTE threshol
 	else {
 		*modifiedCurrent = 0;
 	}*/
+//}
+
+/*
+ *	gpu constants
+ */
+__constant__ UBYTE dev_kernel[kw * kh];
+__constant__ float gpu_kernelSum;
+
+/*
+ *	convolution kernel
+ */
+__global__ void convolutionKernel(UBYTE* src, int w, int h, UBYTE* dst, int edge)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+	//the current pixel's 1d array position
+	int position = (y * w) + x;
+
+	if (position < (w*h))
+	{
+		//the current pixel's new value
+		float current = 0.0f;
+		//go through each item in the kernel
+		for (int kr = -edge; kr <= edge; kr++)
+		{
+			for (int kc = -edge; kc <= edge; kc++)
+			{
+				//printf("(%d, %d)\n", kr, kc);
+				int relativePos = kr * w + kc;
+				int kernelPos = (kr + edge) * kw + kc + edge;
+				//printf("kr: %d, kc: %d, relativePos: %d, kernelPos: %d\n", kr, kc, relativePos, kernelPos);
+				//if (position + relativePos < 0) {
+				//	current = 0;
+				//}
+				//else {
+				current += float(src[position + relativePos]) * float(dev_kernel[kernelPos]);
+				//}
+			}
+		}
+		/*for (int k = 0; k < kw * kh; k++)
+		{
+		//sum up the result of kernel value * original value for each neighboring pixel
+		current += float(src[position + indices[k]]) * float(kernel[k]);
+		}*/
+		//if kernelSum isn't zero (dividing by zero considered harmful)
+		if (int(gpu_kernelSum) != 0) {
+			//divide it by the sum of all the kernel values
+			dst[position] = int(current / gpu_kernelSum);
+		}
+		else {
+			dst[position] = int(current / 1.0f);
+		}
+	}
 }
 #endif
 
@@ -77,11 +128,12 @@ __global__ void thresholdKernel(UBYTE* original, UBYTE* modified, UBYTE threshol
  */
 void threshold(UBYTE threshold, Mat& image);
 #ifdef GPU_VER
-void on_trackbar(int, void*);
-cudaError_t GPUThreshold(UBYTE threshold);
+//void on_trackbar(int, void*);
+//cudaError_t GPUThreshold(UBYTE threshold);
+cudaError_t GPUConvolution(UBYTE* dst);
 #endif
 void boxTrackbar(int, void*);
-void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, int* kernel, int kw, int kh, UBYTE* tmp);
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp);
 
 
 /*
@@ -115,8 +167,8 @@ int main(int argc, char* argv[])
 	}
 
 	//set up a trackbar for quick timing
-	createTrackbar("Threshold", windowName, (int*)&thresholdSlider, 255, boxTrackbar);
-	boxTrackbar(thresholdSlider, 0);
+	//createTrackbar("Threshold", windowName, (int*)&thresholdSlider, 255, boxTrackbar);
+	//boxTrackbar(thresholdSlider, 0);
 
 	//printf("Number of channels: %d\n", image.channels());
 
@@ -130,8 +182,20 @@ int main(int argc, char* argv[])
 		throw "FAILED to set CUDA device";
 	}
 
+	Mat dst;
+	image.copyTo(dst);
+
+	cudaStatus = GPUConvolution(dst.data);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "FAILED to apply box filter\n");
+		exit(1);
+	}
+
+	imshow(windowName, dst);
+	waitKey(0);
+
 	//call this once so I don't need to move all the cuda setup code (and to see a thresholded image from the start)
-	cudaStatus = GPUThreshold(thresholdSlider);
+	/*cudaStatus = GPUThreshold(thresholdSlider);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "FAILED to apply threshold filter\n");
 		//not sure what state the image will be in after things fail, but it's probably better to just stop
@@ -140,10 +204,10 @@ int main(int argc, char* argv[])
 
 	namedWindow(windowName, WINDOW_NORMAL);
 	createTrackbar("Threshold", windowName, (int*)&thresholdSlider, 255, on_trackbar);
-	on_trackbar(thresholdSlider, 0);
+	on_trackbar(thresholdSlider, 0);*/
 	//imshow(windowName, image);
 #endif
-#ifdef GPU_VER //normally ifndef, but needed to make this not run
+#ifndef GPU_VER
 	//threshold(THRESHOLD, image);
 	
 	//set up the kernel for the box filter
@@ -174,11 +238,11 @@ int main(int argc, char* argv[])
 	//namedWindow("Display window", WINDOW_NORMAL);
 	//imshow("Display window", image);
 
-	waitKey(0);
-	printf("\n\nFinal stats:\n");
-	printf("Image size: %d x %d\n", image.cols, image.rows);
-	printf("Kernel size: %d x %d\n", kw, kh);
-	printf("Average time: %f\n", totalTime / double(runs));
+	//waitKey(0);
+	//printf("\n\nFinal stats:\n");
+	//printf("Image size: %d x %d\n", image.cols, image.rows);
+	//printf("Kernel size: %d x %d\n", kw, kh);
+	//printf("Average time: %f\n", totalTime / double(runs));
 
 #ifdef GPU_VER
 	//free memory (might move into catch block)
@@ -219,7 +283,7 @@ void threshold(UBYTE threshold, Mat& image)
 /*
  *	Trackbar Handler
  */
-void on_trackbar(int, void*)
+/*void on_trackbar(int, void*)
 {
 	cudaError_t cudaStatus;
 	printf("Threshold: %d\n", thresholdSlider);
@@ -234,12 +298,12 @@ void on_trackbar(int, void*)
 		fprintf(stderr, "FAILED to copy modified data to CPU memory\n");
 	}
 	imshow(windowName, image);
-}
+}*/
 
 /*
  *	GPU Threshold
  */
-cudaError_t GPUThreshold(UBYTE threshold)
+/*cudaError_t GPUThreshold(UBYTE threshold)
 {
 	//UBYTE* dev_threshold = 0;
 	cudaError_t cudaStatus;
@@ -261,7 +325,7 @@ cudaError_t GPUThreshold(UBYTE threshold)
 			throw "FAILED to allocate dev_threshold";
 		}*/
 
-		cudaStatus = cudaMemcpy(dev_original, image.data, dataSize, cudaMemcpyHostToDevice);
+		/*cudaStatus = cudaMemcpy(dev_original, image.data, dataSize, cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			throw "FAILED to copy image data to GPU memory";
 		}
@@ -271,7 +335,7 @@ cudaError_t GPUThreshold(UBYTE threshold)
 			throw "FAILED to copy threshold to GPU memory";
 		}*/
 		
-		printf("Setting numblocks\n");
+		/*printf("Setting numblocks\n");
 		int numBlocks = (1023 + image.rows * image.cols) / 1024;
 		printf("%d blocks\n", numBlocks);
 		thresholdKernel<<<numBlocks, 1024>>>(dev_original, dev_modified, threshold, dataSize);
@@ -305,7 +369,7 @@ cudaError_t GPUThreshold(UBYTE threshold)
 		printf("GPU memory freed\n");
 	}
 
-	/*//free memory (might move into catch block)
+	/*free memory (might move into catch block)
 	if (dev_original != 0) {
 		cudaFree(dev_original);
 	}
@@ -313,6 +377,118 @@ cudaError_t GPUThreshold(UBYTE threshold)
 		cudaFree(dev_modified);
 	}
 	printf("GPU memory freed\n");*/
+
+	/*return cudaStatus;
+}*/
+
+/*
+	GPU Box filter, etc.
+ */
+cudaError_t GPUConvolution(UBYTE* dst)
+{
+	cudaError_t cudaStatus;
+	dataSize = image.rows * image.cols;
+	try
+	{
+		//int* dev_w, *dev_h, *dev_edge;
+
+		cudaStatus = cudaMalloc((void**)&dev_original, dataSize);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to allocate dev_original";
+		}
+
+		cudaStatus = cudaMalloc((void**)&dev_modified, dataSize);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to allocate dev_modified";
+		}
+
+		/*cudaStatus = cudaMalloc((void**)&dev_w, sizeof(int));
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to allocate dev_w";
+		}
+
+		cudaStatus = cudaMalloc((void**)&dev_h, sizeof(int));
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to allocate dev_h";
+		}
+
+		cudaStatus = cudaMalloc((void**)&dev_edge, sizeof(int));
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to allocate dev_edge";
+		}*/
+
+		cudaStatus = cudaMemcpy(dev_original, image.data, dataSize, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy image data to GPU memory";
+		}
+
+		/*cudaStatus = cudaMemcpy(dev_w, &(image.cols), sizeof(int), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy image width to GPU memory";
+		}
+
+		cudaStatus = cudaMemcpy(dev_h, &(image.rows), sizeof(int), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy image height to GPU memory";
+		}
+
+		int edge = kw / 2;
+		cudaStatus = cudaMemcpy(dev_edge, &edge, sizeof(int), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy kernel radius to GPU memory";
+		}*/
+
+		cudaStatus = cudaMemcpyToSymbol(dev_kernel, boxKernel, kw * kh * sizeof(UBYTE), 0, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy box kernel to GPU memory";
+		}
+
+		//compute kernel sum
+		float sum = 0.0f;
+		for (int i = 0; i < kw * kh; i++) {
+			sum += boxKernel[i];
+		}
+
+		cudaStatus = cudaMemcpyToSymbol(gpu_kernelSum, &sum, sizeof(float), 0, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy kernel sum to GPU memory";
+		}
+
+		printf("Setting numblocks\n");
+		int numBlocks = (1023 + image.rows * image.cols) / 1024;
+		printf("%d blocks\n", numBlocks);
+		convolutionKernel<<<numBlocks, 1024 >>>(dev_original, image.cols, image.rows, dev_modified, kw / 2);
+		//convolutionKernel << <numBlocks, 1024 >> >(dev_original, *dev_w, *dev_h, dev_modified, *dev_edge);
+
+		cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED launching convolution kernel";
+			//throw " ";
+		}
+
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess) {
+			throw "ERROR after launching convolution kernel";
+			//throw " ";
+		}
+
+		cudaStatus = cudaMemcpy(dst, dev_modified, dataSize, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			throw "FAILED to copy modified data to CPU memory";
+		}
+	}
+	catch (char* e)
+	{
+		fprintf(stderr, "ERROR: %s: %d: %s\n", e, cudaStatus, cudaGetErrorString(cudaStatus));
+	}
+
+	if (dev_original != 0) {
+		cudaFree(dev_original);
+	}
+	if (dev_modified != 0) {
+		cudaFree(dev_modified);
+	}
+	printf("GPU memory freed\n");
 
 	return cudaStatus;
 }
@@ -361,7 +537,7 @@ void boxTrackbar(int, void*)
 /*
  *	CPU box filter
  */
-void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, int* kernel, int kw, int kh, UBYTE* tmp)
+void boxFilter(UBYTE* src, UBYTE* dst, int w, int h, UBYTE* kernel, int kw, int kh, UBYTE* tmp)
 {
 	//used to easily move to surrounding pixels
 	//int indices[] = {-(w+1), -w, -(w-1), -1, 0, 1, w-1, w, w+1};
